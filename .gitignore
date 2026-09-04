@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Locally registered demo users (contains names, phone numbers, addresses)
+users.json

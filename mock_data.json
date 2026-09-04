@@ -1,0 +1,239 @@
+[
+    {
+        "claim_id": "FRA-2026-001",
+        "applicant_name": "Rahul Ganpi",
+        "district": "Bastar",
+        "lat": 19.0744,
+        "lon": 82.0255,
+        "status": "Pending",
+        "anomaly": "Delayed (>180 days)",
+        "land_area_ha": 2.5
+    },
+    {
+        "claim_id": "FRA-2026-002",
+        "applicant_name": "Narendra Mopi",
+        "district": "Bastar",
+        "lat": 19.12,
+        "lon": 81.95,
+        "status": "Approved",
+        "anomaly": "None",
+        "land_area_ha": 1.8
+    },
+    {
+        "claim_id": "FRA-2026-003",
+        "applicant_name": "Abhijeet Dipil",
+        "district": "Bastar",
+        "lat": 18.98,
+        "lon": 82.1,
+        "status": "Flagged",
+        "anomaly": "Mismatched Land Record",
+        "land_area_ha": 5.0
+    },
+    {
+        "claim_id": "FRA-2026-004",
+        "applicant_name": "Kangana Ranauk",
+        "district": "Bastar",
+        "lat": 18.58,
+        "lon": 82.25,
+        "status": "Flagged",
+        "anomaly": "Missing Gram Sabha Resolution",
+        "land_area_ha": 3.2
+    },
+    {
+        "claim_id": "FRA-2026-005",
+        "applicant_name": "Iron Man",
+        "district": "Bastar",
+        "lat": 20.48,
+        "lon": 82.14,
+        "status": "Flagged",
+        "anomaly": "Coordinates Outside District Boundary",
+        "land_area_ha": 1.8
+    },
+    {
+        "claim_id": "FRA-2026-006",
+        "applicant_name": "Sukhram Baghel",
+        "district": "Bastar",
+        "lat": 19.021,
+        "lon": 81.834,
+        "status": "Approved",
+        "anomaly": "None",
+        "land_area_ha": 2.1
+    },
+    {
+        "claim_id": "FRA-2026-007",
+        "applicant_name": "Phulwati Netam",
+        "district": "Bastar",
+        "lat": 19.156,
+        "lon": 81.762,
+        "status": "Pending",
+        "anomaly": "Incomplete Documentation",
+        "land_area_ha": 1.4
+    },
+    {
+        "claim_id": "FRA-2026-008",
+        "applicant_name": "Budhram Kashyap",
+        "district": "Bastar",
+        "lat": 19.205,
+        "lon": 81.701,
+        "status": "Flagged",
+        "anomaly": "Area Exceeds Statutory Limit (>4 ha)",
+        "land_area_ha": 6.3
+    },
+    {
+        "claim_id": "FRA-2026-009",
+        "applicant_name": "Jaymati Poyam",
+        "district": "Bastar",
+        "lat": 18.832,
+        "lon": 81.904,
+        "status": "Approved",
+        "anomaly": "None",
+        "land_area_ha": 0.9
+    },
+    {
+        "claim_id": "FRA-2026-010",
+        "applicant_name": "Mangal Singh Markam",
+        "district": "Bastar",
+        "lat": 18.771,
+        "lon": 81.948,
+        "status": "Pending",
+        "anomaly": "Delayed (>180 days)",
+        "land_area_ha": 3.6
+    },
+    {
+        "claim_id": "FRA-2026-011",
+        "applicant_name": "Sunita Bhatra",
+        "district": "Bastar",
+        "lat": 19.283,
+        "lon": 81.961,
+        "status": "Approved",
+        "anomaly": "None",
+        "land_area_ha": 2.7
+    },
+    {
+        "claim_id": "FRA-2026-012",
+        "applicant_name": "Dhaniram Nag",
+        "district": "Bastar",
+        "lat": 19.148,
+        "lon": 82.152,
+        "status": "Flagged",
+        "anomaly": "Duplicate Claim",
+        "land_area_ha": 2.2
+    },
+    {
+        "claim_id": "FRA-2026-013",
+        "applicant_name": "Champa Kawasi",
+        "district": "Bastar",
+        "lat": 18.904,
+        "lon": 81.725,
+        "status": "Pending",
+        "anomaly": "Awaiting Sub-Divisional Committee Review",
+        "land_area_ha": 1.1
+    },
+    {
+        "claim_id": "FRA-2026-014",
+        "applicant_name": "Ramesh Halba",
+        "district": "Bastar",
+        "lat": 19.047,
+        "lon": 82.091,
+        "status": "Approved",
+        "anomaly": "None",
+        "land_area_ha": 3.9
+    },
+    {
+        "claim_id": "FRA-2026-015",
+        "applicant_name": "Lachhu Mandavi",
+        "district": "Bastar",
+        "lat": 18.859,
+        "lon": 82.048,
+        "status": "Flagged",
+        "anomaly": "Overlaps Reserved Forest Compartment",
+        "land_area_ha": 4.4
+    },
+    {
+        "claim_id": "FRA-2026-016",
+        "applicant_name": "Savitri Korram",
+        "district": "Bastar",
+        "lat": 19.312,
+        "lon": 81.833,
+        "status": "Approved",
+        "anomaly": "None",
+        "land_area_ha": 1.6
+    },
+    {
+        "claim_id": "FRA-2026-017",
+        "applicant_name": "Hidma Podiyami",
+        "district": "Bastar",
+        "lat": 18.742,
+        "lon": 81.786,
+        "status": "Pending",
+        "anomaly": "Delayed (>180 days)",
+        "land_area_ha": 2.0
+    },
+    {
+        "claim_id": "FRA-2026-018",
+        "applicant_name": "Ganga Ram Bhaskar",
+        "district": "Bastar",
+        "lat": 19.226,
+        "lon": 82.074,
+        "status": "Flagged",
+        "anomaly": "Mismatched Land Record",
+        "land_area_ha": 3.1
+    },
+    {
+        "claim_id": "FRA-2026-019",
+        "applicant_name": "Anita Kunjam",
+        "district": "Bastar",
+        "lat": 18.966,
+        "lon": 81.689,
+        "status": "Approved",
+        "anomaly": "None",
+        "land_area_ha": 1.3
+    },
+    {
+        "claim_id": "FRA-2026-020",
+        "applicant_name": "Somaru Kartam",
+        "district": "Bastar",
+        "lat": 19.093,
+        "lon": 81.642,
+        "status": "Pending",
+        "anomaly": "Incomplete Documentation",
+        "land_area_ha": 2.8
+    },
+    {
+        "claim_id": "FRA-2026-021",
+        "applicant_name": "Anonymous",
+        "district": "Bastar",
+        "lat": 19.1209,
+        "lon": 81.9765,
+        "status": "Flagged",
+        "anomaly": "Delayed (>180 days)",
+        "land_area_ha": null,
+        "description": "not protected",
+        "reported_at": "2026-09-05T00:52:19"
+    },
+    {
+        "claim_id": "FRA-2026-022",
+        "applicant_name": "Anonymous",
+        "district": "Bastar",
+        "lat": 19.2159,
+        "lon": 81.8929,
+        "status": "Flagged",
+        "anomaly": "Mismatched Land Record",
+        "land_area_ha": null,
+        "description": "mismatch",
+        "reported_at": "2026-09-05T00:59:01"
+    },
+    {
+        "claim_id": "FRA-2026-023",
+        "applicant_name": "Mahi",
+        "reported_by": "9463877525",
+        "district": "Bastar",
+        "lat": 19.1323,
+        "lon": 81.9141,
+        "status": "Flagged",
+        "anomaly": "Mismatched Land Record",
+        "land_area_ha": null,
+        "description": "mismatched data",
+        "reported_at": "2026-09-05T01:09:43"
+    }
+]
