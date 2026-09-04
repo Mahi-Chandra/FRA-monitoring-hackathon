@@ -1,0 +1,9 @@
+# White text floats on glass panes over a dark forest photo, so pin the dark
+# base rather than letting it follow the viewer's OS preference.
+
+[theme]
+base = "dark"
+primaryColor = "#4caf50"
+backgroundColor = "#0d2417"
+secondaryBackgroundColor = "#14351f"
+textColor = "#f2f7f3"
