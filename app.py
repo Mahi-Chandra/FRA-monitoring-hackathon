@@ -1,19 +1,4 @@
-"""Forest Rights Act — Decision Support System.
-
-An administrative view over FRA claims: state and district progress against
-title recognition, extent of forest land recognised, and the anomalies holding
-individual claims up. Read-only — there is no public-facing intake here.
-
-Officials only: nothing below the masthead renders until a sign-in succeeds,
-and an official carrying a district sees that district's caseload alone.
-Accounts and tokens are handled by fra_auth. Claim flagging and the LLM
-summary run inside this process — there is no separate analysis service to
-start, and the only call that leaves the machine is the one to Groq.
-
-There is no self-registration. This screen authenticates existing authorised
-administrators and nothing else; accounts are provisioned out of band, through
-fra_auth.create_user, by whoever administers the deployment.
-"""
+"""FRA Decision Support System - Claims monitoring dashboard for officials."""
 
 import base64
 import html
@@ -28,54 +13,31 @@ import requests
 import streamlit as st
 from streamlit_folium import st_folium
 from dotenv import load_dotenv
-load_dotenv()
 
+load_dotenv()
 import fra_auth
 
 DATA_FILE = Path(__file__).parent / "mock_data.json"
 BACKGROUND_IMAGE = Path(__file__).parent / "forest_bg.jpg"
 
-# --- Analysis configuration -------------------------------------------------
-# Groq's free tier backs the AI insights card. The key is read once at import,
-# after load_dotenv(), so a missing one surfaces as a message on the card
-# rather than a crash on startup.
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b").strip()
 
-# Groq's free tier is quick; 30s is generous for a few hundred claims and
-# still short enough that a stuck call does not hold the rerun open for long.
 LLM_TIMEOUT_SECONDS = 30
-
-# A whole caseload pasted into one prompt would blow the context window and
-# the rate limit. Beyond this the summary is built from a prefix and the
-# prompt says so, rather than the request failing.
 MAX_CLAIMS_IN_PROMPT = 150
 
-# FRA s.4(6) caps individual forest rights at 4 hectares. Anything larger is
-# not automatically wrong — community claims exist — but it is worth a look.
 INDIVIDUAL_AREA_CEILING_HA = 4.0
-
-# How long a pending claim may sit before the delay is itself the anomaly.
 PENDING_DAYS_THRESHOLD = 90
 
 NO_ANOMALY_VALUES = {"", "none", "no anomaly", "n/a", "-"}
 
-# Streamlit keeps no browser-side storage, so the signed token lives in
-# session_state: per browser tab, held in server memory, and gone on refresh.
-# Refreshing the page therefore means signing in again.
 TOKEN_KEY = "auth_token"
 AUTH_NOTICE_KEY = "auth_notice"
 
-# Fallback map view (Bastar district, Chhattisgarh) for when no claim carries
-# usable coordinates to fit the view to.
 DEFAULT_MAP_CENTER = [19.0744, 82.0255]
 DEFAULT_MAP_ZOOM = 10
 
-# --- Claim vocabulary -------------------------------------------------------
-# The three statuses the data uses, in the administrative sense they carry: an
-# Approved claim is a title distributed, Pending is still in the pipeline,
-# Flagged is held for review against one of the anomalies.
 TITLE_STATUS = "Approved"
 PENDING_STATUS = "Pending"
 FLAGGED_STATUS = "Flagged"
@@ -89,20 +51,12 @@ STATUS_COLORS = {
     FLAGGED_STATUS: "red",
 }
 
-# Background / text pairs for the status chips. The text colour doubles as the
-# map legend dot, so each one has to stay legible on a translucent panel over
-# the forest photo.
 STATUS_CHIPS = {
     TITLE_STATUS: ("rgba(129, 199, 132, 0.22)", "#c8e6c9"),
     PENDING_STATUS: ("rgba(255, 183, 77, 0.22)", "#ffe0b2"),
     FLAGGED_STATUS: ("rgba(239, 83, 80, 0.26)", "#ffcdd2"),
 }
-DEFAULT_CHIP = ("rgba(255, 255, 255, 0.16)", "#e4e7e5")
 
-# Claims carry a district but no state, so the state rolls up through this
-# lookup. A claim may also carry an explicit "state" key, which wins. Districts
-# outside the lookup roll up as UNMAPPED_STATE and get called out in the panel
-# rather than being silently folded into a neighbour.
 FRA_DISTRICTS_BY_STATE = {
     "Chhattisgarh": (
         "Bastar", "Bijapur", "Dantewada", "Kanker", "Kondagaon", "Narayanpur",
@@ -143,8 +97,6 @@ DISTRICT_STATE = {
     for district in districts
 }
 
-# Esri's satellite basemap. Served without an API key, but the attribution
-# below is a condition of use, so it always rides along with the layer.
 ESRI_IMAGERY_URL = (
     "https://server.arcgisonline.com/ArcGIS/rest/services"
     "/World_Imagery/MapServer/tile/{z}/{y}/{x}"
@@ -153,7 +105,6 @@ ESRI_IMAGERY_ATTR = (
     "Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, "
     "Getmapping, Aerogrid, IGN, IGP, UPF, and the GIS User Community"
 )
-# Satellite imagery carries no place names, so labels go on as an overlay.
 ESRI_LABELS_URL = (
     "https://server.arcgisonline.com/ArcGIS/rest/services"
     "/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
@@ -163,19 +114,10 @@ ESRI_LABELS_ATTR = "Labels &copy; Esri"
 MAP_HEIGHT = 640
 
 
-# `mtime` is only there as a cache key: saving an edit to mock_data.json
-# invalidates the entry, so the dashboard picks the change up on the next rerun
-# instead of serving the copy it read at startup.
 @st.cache_data(show_spinner=False)
 def load_claims(mtime):
     with open(DATA_FILE, encoding="utf-8") as f:
         return json.load(f)
-
-
-# --- Aggregation ------------------------------------------------------------
-# Everything the left panel reports is derived here, straight off the claims
-# list. Nothing is hard-coded, so adding districts or states to mock_data.json
-# is all it takes for them to show up.
 
 
 def district_of(claim):
@@ -183,7 +125,6 @@ def district_of(claim):
 
 
 def state_of(claim):
-    """An explicit `state` on the claim wins; otherwise infer from district."""
     state = (claim.get("state") or "").strip()
     if state:
         return state
@@ -191,11 +132,6 @@ def state_of(claim):
 
 
 def hectares(claim):
-    """Recorded extent, or None. Guards against nulls and stray strings.
-
-    `area_ha` is accepted as a fallback spelling, and a bool is not an extent
-    however happily Python treats it as an int.
-    """
     value = claim.get("land_area_ha", claim.get("area_ha"))
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -203,11 +139,8 @@ def hectares(claim):
 
 
 def summarise(claims):
-    """Roll a set of claims into the figures the panel reports."""
     counts = Counter(claim.get("status", "Unknown") for claim in claims)
 
-    # "Recognised" is extent behind a distributed title; "under claim" is
-    # everything on file, whatever stage it has reached.
     recognised = 0.0
     under_claim = 0.0
     no_extent = 0
@@ -235,7 +168,6 @@ def summarise(claims):
 
 
 def grouped_summary(claims, key_of):
-    """summarise() per group, heaviest caseload first — how an admin scans."""
     buckets = defaultdict(list)
     for claim in claims:
         buckets[key_of(claim)].append(claim)
@@ -253,12 +185,10 @@ def state_rows(claims):
 
 
 def district_rows(claims):
-    """Keyed on (state, district) so same-named districts stay distinct."""
     return grouped_summary(claims, lambda claim: (state_of(claim), district_of(claim)))
 
 
 def anomaly_rows(claims):
-    """(anomaly, count) worst first, plus how many claims are clean."""
     counts = Counter((claim.get("anomaly") or NO_ANOMALY).strip() for claim in claims)
     clean = counts.pop(NO_ANOMALY, 0)
     ranked = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
@@ -266,22 +196,11 @@ def anomaly_rows(claims):
 
 
 def unmapped_districts(claims):
-    """Districts that fell through DISTRICT_STATE, so they can be called out."""
     return sorted(
         {district_of(claim) for claim in claims if state_of(claim) == UNMAPPED_STATE}
     )
 
 
-# --- Glass morphism styling -------------------------------------------------
-# The forest photo is the page background; every panel above it is a
-# semi-transparent pane that blurs whatever it covers. Cards are plain
-# `st.container(key=...)` blocks — Streamlit turns the key into an
-# `st-key-<key>` class, which is what the `st-key-glass-` selectors hook into,
-# so any container keyed `glass-*` becomes a frosted pane.
-
-# The browser cannot read a local file path out of a CSS rule, so the photo is
-# inlined as a data URI. `mtime` is part of the cache key so dropping in a new
-# forest_bg.jpg picks it up on the next rerun.
 @st.cache_data(show_spinner=False)
 def encoded_background(path_str, mtime):
     data = base64.b64encode(Path(path_str).read_bytes()).decode("ascii")
@@ -289,17 +208,10 @@ def encoded_background(path_str, mtime):
 
 
 def page_background():
-    """CSS `background` value for the page. Returns (value, warning_or_None).
-
-    The photo averages out fairly dark, but a scrim still goes over it so the
-    odd bright gap in the canopy cannot wash out the white text on the panes.
-    """
     scrim = "linear-gradient(rgba(9, 22, 14, 0.55), rgba(9, 22, 14, 0.64))"
     try:
         uri = encoded_background(str(BACKGROUND_IMAGE), BACKGROUND_IMAGE.stat().st_mtime)
     except OSError:
-        # No photo on disk — fall back to a forest gradient so the glass panes
-        # still have something to sit on instead of a blank page.
         return (
             "linear-gradient(165deg, #0d2417 0%, #10321f 55%, #0b1d13 100%)",
             f"Background image not found: {BACKGROUND_IMAGE.name}",
@@ -309,30 +221,14 @@ def page_background():
 
 PANEL_CSS = """
 <style>
-/* --- palette -------------------------------------------------------------
-   Surfaces: rgba(255,255,255,0.1) panes, blur(12px), soft white borders.
-   Text: white and near-white, kept crisp against the photo.
-   Accent: forest #2e7d32, lifted to #a5d6a7 where it has to read as text on
-   a dark pane.
-   ------------------------------------------------------------------------ */
-
-/* --- the forest photo, covering the whole page --------------------------- */
 [data-testid="stAppViewContainer"] {
     background: __BACKGROUND__;
 }
 [data-testid="stHeader"] { background: transparent; }
 [data-testid="stMainBlockContainer"] { padding-top: 2.2rem; max-width: 100%; }
 
-/* the sidebar is unused; the decision support panel is the left column */
 [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"] { display: none; }
 
-/* --- the glass tray the decision support panel sits in -------------------
-   Held at 0.06 rather than 0.1 because the cards inside are themselves 0.1 —
-   stacking two 0.1 panes reads as one muddy 0.19 pane and the blur doubles.
-
-   Keyed on its own container rather than `stColumn:first-of-type`, which
-   matched the leading column of *every* row on the page — including the
-   masthead's — and wrapped each one in a stray frosted box. */
 div[class*="st-key-fra-tray"] {
     background: rgba(255, 255, 255, 0.06);
     border: 1px solid rgba(255, 255, 255, 0.16);
@@ -343,7 +239,6 @@ div[class*="st-key-fra-tray"] {
     box-shadow: 0 10px 36px rgba(0, 0, 0, 0.26);
 }
 
-/* --- cards --------------------------------------------------------------- */
 div[class*="st-key-glass-"] {
     background: rgba(255, 255, 255, 0.10);
     border: 1px solid rgba(255, 255, 255, 0.22);
@@ -363,7 +258,6 @@ div[class*="st-key-glass-"] h3 {
     margin: 0;
 }
 
-/* crisp text on the panes */
 div[class*="st-key-glass-"],
 div[class*="st-key-glass-"] p,
 div[class*="st-key-glass-"] li,
@@ -376,7 +270,6 @@ div[class*="st-key-glass-"] [data-testid="stCaptionContainer"] p {
     color: rgba(255, 255, 255, 0.72);
 }
 
-/* --- masthead: sits straight on the photo, so it gets a shadow ----------- */
 .fra-masthead h1 {
     font-size: 1.95rem;
     font-weight: 700;
@@ -397,7 +290,6 @@ div[class*="st-key-glass-"] [data-testid="stCaptionContainer"] p {
     letter-spacing: 0.03em;
 }
 
-/* --- metrics containers -------------------------------------------------- */
 div[class*="st-key-glass-"] [data-testid="stMetric"] {
     background: rgba(255, 255, 255, 0.10);
     border: 1px solid rgba(255, 255, 255, 0.20);
@@ -417,7 +309,6 @@ div[class*="st-key-glass-"] [data-testid="stMetricValue"] {
     color: #ffffff;
 }
 
-/* --- progress tables ----------------------------------------------------- */
 .fra-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
 .fra-table th {
     text-align: left;
@@ -446,7 +337,6 @@ div[class*="st-key-glass-"] [data-testid="stMetricValue"] {
 .fra-table td.pending { color: #ffe0b2; }
 .fra-table td.flagged { color: #ffcdd2; }
 
-/* --- anomaly breakdown --------------------------------------------------- */
 .fra-anom { display: flex; flex-direction: column; gap: 0.62rem; }
 .fra-anom-head {
     display: flex;
@@ -472,7 +362,6 @@ div[class*="st-key-glass-"] [data-testid="stMetricValue"] {
     background: linear-gradient(90deg, #ffb74d, #ff8a65);
 }
 
-/* --- map ----------------------------------------------------------------- */
 div[class*="st-key-glass-map"] { padding: 0.7rem; }
 div[class*="st-key-glass-map"] iframe {
     border-radius: 15px;
@@ -488,21 +377,7 @@ div[class*="st-key-glass-map"] iframe {
 }
 .fra-legend span { display: inline-flex; align-items: center; gap: 0.4rem; }
 .fra-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
-.fra-chip {
-    display: inline-block;
-    padding: 0.12rem 0.6rem;
-    border-radius: 999px;
-    font-size: 0.72rem;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    border: 1px solid rgba(255, 255, 255, 0.18);
-}
 
-/* --- sign-in ------------------------------------------------------------
-   A single narrow pane centred on the photo. Deliberately laid out without
-   st.columns: the tray rule above claims the first column on the page, and
-   a centring column would pick that styling up and wrap the form in a second
-   frosted box. */
 div[class*="st-key-glass-auth"] {
     max-width: 430px;
     margin: 3vh auto 0;
@@ -528,7 +403,6 @@ div[class*="st-key-glass-auth"] label p {
     text-transform: uppercase;
     color: rgba(255, 255, 255, 0.78) !important;
 }
-/* the primary action: solid forest green, full width */
 div[class*="st-key-glass-auth"] button[kind="primaryFormSubmit"] {
     background: #2e7d32;
     border: 1px solid rgba(255, 255, 255, 0.22);
@@ -546,7 +420,6 @@ div[class*="st-key-glass-auth"] button[kind="primaryFormSubmit"]:hover {
     margin: 0.9rem 0 0;
     line-height: 1.45;
 }
-/* the restricted-access line above the form */
 .fra-auth-restricted {
     font-size: 0.76rem;
     color: rgba(255, 255, 255, 0.72);
@@ -555,7 +428,6 @@ div[class*="st-key-glass-auth"] button[kind="primaryFormSubmit"]:hover {
 }
 .fra-auth-restricted b { color: #a5d6a7; font-weight: 600; }
 
-/* the demo credential — deliberately the most visible thing on the form */
 .fra-demo-hint {
     font-size: 0.78rem;
     color: rgba(255, 255, 255, 0.9);
@@ -574,7 +446,6 @@ div[class*="st-key-glass-auth"] button[kind="primaryFormSubmit"]:hover {
     color: #ffffff;
 }
 
-/* --- signed-in identity, sat in the masthead ----------------------------- */
 .fra-whoami {
     font-size: 0.78rem;
     color: rgba(255, 255, 255, 0.85);
@@ -589,7 +460,6 @@ div[class*="st-key-glass-auth"] button[kind="primaryFormSubmit"]:hover {
 
 
 def glass(key):
-    """A frosted-glass card. `key` is prefixed so the CSS above picks it up."""
     return st.container(key=f"glass-{key}")
 
 
@@ -606,11 +476,6 @@ def area(value):
 
 
 def table_html(columns, rows):
-    """Render a table. `columns` is [(label, css_class)]; each row matches it.
-
-    District and state names come out of the data file, so every cell is
-    escaped on the way in.
-    """
     head = "".join(
         f'<th class="{cls}">{html.escape(label)}</th>' for label, cls in columns
     )
@@ -629,22 +494,7 @@ def table_html(columns, rows):
     )
 
 
-# --- Officials authentication -----------------------------------------------
-# The dashboard signs officials in through fra_auth directly, in this process:
-# no HTTP hop, no second service to keep up. The token it mints is an ordinary
-# JWT held in session_state, and every rerun re-verifies it.
-#
-# Sign-in is the only view: an account cannot be created from this interface,
-# so the sole way in is credentials an administrator issued beforehand.
-
-
 def current_official():
-    """Verified claims for this session, or None if nobody is signed in.
-
-    Re-verified on every rerun rather than trusted once at login, so a token
-    that expires or is logged out elsewhere drops the session on the next
-    interaction instead of lingering for the life of the tab.
-    """
     token = st.session_state.get(TOKEN_KEY)
     if not token:
         return None
@@ -658,12 +508,6 @@ def current_official():
 
 
 def sign_in(email, password):
-    """Authenticate and stash the token. Returns an error string, or None.
-
-    The caller shows whatever comes back verbatim — and what comes back on
-    failure is always the same sentence, whether the email is unknown or the
-    password is simply wrong.
-    """
     user = fra_auth.verify_credentials(email, password)
     if user is None:
         return fra_auth.GENERIC_LOGIN_ERROR
@@ -674,7 +518,6 @@ def sign_in(email, password):
 
 
 def sign_out():
-    """Retire the token server-side, then clear it from the session."""
     token = st.session_state.get(TOKEN_KEY)
     if token:
         claims, error = fra_auth.decode_token(token)
@@ -685,7 +528,6 @@ def sign_out():
 
 
 def show_auth_notice():
-    """Drain the one-shot message left by the rerun that got us here."""
     notice = st.session_state.pop(AUTH_NOTICE_KEY, None)
     if not notice:
         return
@@ -697,11 +539,6 @@ DEMO_SEEDED_KEY = "demo_seeded"
 
 
 def ensure_demo_account():
-    """Seed the advertised demo login, once per session.
-
-    Seeding hashes a password, which is slow enough not to want on every rerun
-    of the login form — and the account only has to be created once.
-    """
     if st.session_state.get(DEMO_SEEDED_KEY):
         return
     fra_auth.ensure_demo_user()
@@ -709,13 +546,6 @@ def ensure_demo_account():
 
 
 def render_demo_hint():
-    """The demo credential, spelled out on the form.
-
-    Read straight off fra_auth so what is shown cannot drift from what actually
-    signs in. This fake account is the only credential displayed anywhere in
-    the UI — no real official's password is ever shown, logged or hinted at,
-    and this block disappears entirely when FRA_DEMO_ACCOUNT=0.
-    """
     if not fra_auth.DEMO_ACCOUNT_ENABLED:
         return
     st.markdown(
@@ -728,17 +558,10 @@ def render_demo_hint():
 
 
 def render_login_form():
-    """The one way in: credentials against an account already on file.
-
-    Nothing here creates, names or hints at an account — a wrong email and a
-    wrong password come back as the same sentence, so the form cannot be used
-    to work out which addresses are registered.
-    """
     card_title("Official sign in")
     st.markdown(
         '<p class="fra-auth-restricted">Restricted system. '
-        "<b>Authorised administrators only.</b> Access is logged, and this "
-        "session ends when the browser tab is refreshed.</p>",
+        "<b>Authorised administrators only.</b> Access is logged.</p>",
         unsafe_allow_html=True,
     )
     show_auth_notice()
@@ -759,8 +582,6 @@ def render_login_form():
         )
 
     if submitted:
-        # Caught before fra_auth so an empty submit does not burn a hash
-        # comparison, and so the user gets a prompt rather than a rejection.
         if not email.strip() or not password:
             st.error("Enter your email and password.")
             return
@@ -772,23 +593,17 @@ def render_login_form():
             st.rerun()
 
     st.markdown(
-        '<p class="fra-auth-note">Accounts are issued by the system '
-        "administrator. If you cannot sign in, or need access revoked, "
-        "contact them directly — there is no self-service registration or "
-        "password reset here.</p>",
+        '<p class="fra-auth-note">Contact your administrator for access.</p>',
         unsafe_allow_html=True,
     )
 
 
 def render_auth_screen():
-    """The whole page when nobody is signed in."""
     with glass("auth"):
         render_login_form()
 
 
-
 def render_identity_bar(official):
-    """Who is signed in, and the way out — sits beside the masthead."""
     scope = official.get("district") or "All districts"
     st.markdown(
         '<div class="fra-whoami">'
@@ -803,12 +618,6 @@ def render_identity_bar(official):
 
 
 def visible_claims(claims, official):
-    """The caseload this official is cleared to see.
-
-    An admin, or an official with no district recorded, sees everything on
-    file. Otherwise the dashboard is scoped to their own district — every
-    figure, table and marker downstream derives from this list.
-    """
     if official.get("role") == fra_auth.ADMIN_ROLE:
         return claims
 
@@ -820,24 +629,13 @@ def visible_claims(claims, official):
     return [claim for claim in claims if district_of(claim).casefold() == wanted]
 
 
-# --- Rule-based checks ------------------------------------------------------
-# Deterministic, instant, and free. These run first so the model is
-# summarising findings rather than being trusted to spot them.
-
-
 class LLMError(RuntimeError):
-    """An LLM call that failed in a way worth showing an official.
-
-    Carries a message already fit for the dashboard: no stack traces, no
-    request URLs, and never the API key, whatever the underlying library put
-    in its own exception text.
-    """
+    """Error from the LLM service, safe to show in the dashboard."""
+    pass
 
 
 def days_since(date_str):
-    """Days since a given date (YYYY-MM-DD), or None if it is missing or
-    unparseable — mock_data.json records no filed_date, and one absent field
-    should sit a rule out rather than fail the whole analysis."""
+    """Days elapsed since YYYY-MM-DD, or None if missing."""
     try:
         filed = datetime.strptime(date_str, "%Y-%m-%d")
     except (TypeError, ValueError):
@@ -846,20 +644,13 @@ def days_since(date_str):
 
 
 def recorded_anomaly(claim):
-    """The upstream anomaly note, or None when the record is clean."""
+    """Upstream anomaly note, or None if clean."""
     anomaly = str(claim.get("anomaly") or "").strip()
     return None if anomaly.lower() in NO_ANOMALY_VALUES else anomaly
 
 
 def rule_based_flags(claims):
-    """
-    Fast, deterministic anomaly checks — no AI needed for this part.
-    Add more rules here as your project needs (duplicates, overlaps, etc).
-
-    Field names follow mock_data.json: claim_id, applicant_name, district,
-    lat, lon, status, anomaly, land_area_ha. Every rule tolerates its field
-    being missing, so a partial record loses one check rather than the run.
-    """
+    """Fast, deterministic anomaly checks."""
     seen_ids = set()
     duplicate_ids = set()
     for claim in claims:
@@ -909,15 +700,8 @@ def rule_based_flags(claims):
     return flagged
 
 
-# --- LLM summary ------------------------------------------------------------
-
-
 def prompt_payload(flagged_claims):
-    """The claims as compact JSON, trimmed to what the model needs to read.
-
-    Coordinates and any other extras are dropped: they cost tokens and the
-    summary never cites them.
-    """
+    """Claims data trimmed for the LLM prompt."""
     trimmed = [
         {
             "claim_id": claim.get("claim_id"),
@@ -934,9 +718,8 @@ def prompt_payload(flagged_claims):
     dropped = len(flagged_claims) - len(trimmed)
     if dropped > 0:
         body += (
-            f"\n\n(Showing the first {len(trimmed)} of "
-            f"{len(flagged_claims)} claims; {dropped} were omitted for "
-            "length. Say so in the summary.)"
+            f"\n\n(Showing first {len(trimmed)} of "
+            f"{len(flagged_claims)} claims; {dropped} omitted.)"
         )
     return body
 
@@ -947,19 +730,19 @@ Here is claims data with anomaly flags already computed:
 
 {prompt_payload(flagged_claims)}
 
-Do NOT repeat totals like claim counts, status breakdown, or district counts — those numbers already appear elsewhere on the dashboard. Instead, using the "flags" field on each claim, tell the official something they cannot already see at a glance:
+Do NOT repeat totals like claim counts or status breakdown — those are shown elsewhere on the dashboard. Instead:
 
-TOP CONCERN: the single most urgent claim (ID) and exactly why — pick the one where flags compound each other (e.g. long delay + missing data), not just the oldest or the first flagged.
+TOP CONCERN: the single most urgent claim (ID) and exactly why.
 
-PATTERN: one line spotting something across multiple claims — a repeated flag type, several claims sharing the same problem, or an anomaly cluster worth investigating as one issue rather than fixing individually.
+PATTERN: one line spotting something across multiple claims.
 
-WATCH: one claim that looks clean now but has an early warning sign (e.g. approaching the pending threshold, land area right at the ceiling) that could become a problem soon if ignored.
+WATCH: one claim that looks clean now but has an early warning sign.
 
-Each section max 2 lines, under 15 words per line. No markdown, no repeated numbers, no restating what flags already say verbatim — interpret them."""
+Each section max 2 lines, under 15 words per line. No markdown, no repeated numbers."""
 
 
 def groq_error_message(response):
-    """Groq's own complaint, if it sent one, else the bare status line."""
+    """Groq's error message if available."""
     try:
         payload = response.json()
     except ValueError:
@@ -975,16 +758,10 @@ def groq_error_message(response):
 
 
 def get_ai_summary(flagged_claims):
-    """
-    Sends the already-flagged data to Groq's free LLM API
-    and asks for a short plain-English summary for officials.
-
-    Raises LLMError with a displayable message on every failure path.
-    """
+    """Sends flagged data to Groq and returns a summary."""
     if not GROQ_API_KEY:
         raise LLMError(
-            "GROQ_API_KEY is not set. Add it to .env next to app.py and "
-            "restart the dashboard."
+            "GROQ_API_KEY is not set. Add it to .env next to app.py."
         )
 
     try:
@@ -1008,8 +785,6 @@ def get_ai_summary(flagged_claims):
             f"Groq did not respond within {LLM_TIMEOUT_SECONDS} seconds."
         ) from None
     except requests.RequestException:
-        # Deliberately not str(exc): urllib3 messages carry the full request
-        # context, which is noise at best in a dashboard toast.
         raise LLMError("Could not reach the Groq API.") from None
 
     if not response.ok:
@@ -1018,7 +793,7 @@ def get_ai_summary(flagged_claims):
     try:
         summary = response.json()["choices"][0]["message"]["content"]
     except (ValueError, KeyError, IndexError, TypeError):
-        raise LLMError("Groq returned a response in an unexpected shape.") from None
+        raise LLMError("Groq returned an unexpected response format.") from None
 
     summary = (summary or "").strip()
     if not summary:
@@ -1026,11 +801,7 @@ def get_ai_summary(flagged_claims):
     return summary
 
 
-# --- Decision support panel -------------------------------------------------
-
-
 def render_programme_card(claims):
-    """The headline position across everything on file."""
     with glass("programme"):
         card_title("Programme overview")
 
@@ -1049,13 +820,11 @@ def render_programme_card(claims):
         rate.metric("Recognition rate", f"{totals['recognition_rate']:.0f}%")
 
         st.caption(
-            f"{area(totals['under_claim_ha'])} ha under claim in total · "
-            "recognised extent counts claims with a distributed title only."
+            f"{area(totals['under_claim_ha'])} ha under claim in total."
         )
         if totals["no_extent"]:
             st.caption(
-                f"⚠ {totals['no_extent']} claim(s) carry no recorded extent and "
-                "contribute nothing to the hectare figures."
+                f"⚠ {totals['no_extent']} claim(s) have no recorded extent."
             )
 
 
@@ -1088,19 +857,11 @@ def render_state_card(claims):
         )
 
         if len(rows) == 1:
-            st.caption(
-                f"All claims on file sit in {rows[0]['key']}; further states "
-                "appear here as they are added to the data."
-            )
+            st.caption(f"All claims sit in {rows[0]['key']}.")
 
         stray = unmapped_districts(claims)
         if stray:
-            st.caption(
-                "⚠ No state mapped for: "
-                + ", ".join(stray)
-                + " — add them to FRA_DISTRICTS_BY_STATE, or set a `state` key "
-                "on those claims."
-            )
+            st.caption("⚠ No state mapped for: " + ", ".join(stray))
 
 
 def render_district_card(claims):
@@ -1108,8 +869,6 @@ def render_district_card(claims):
         card_title("District-wise progress")
 
         rows = district_rows(claims)
-        # The state column only earns its width once more than one state is in
-        # play; with a single state it repeats the card above.
         multi_state = len({row["key"][0] for row in rows}) > 1
 
         columns = [("District", "lead")]
@@ -1139,7 +898,7 @@ def render_district_card(claims):
             table_rows.append(cells)
 
         st.markdown(table_html(columns, table_rows), unsafe_allow_html=True)
-        st.caption(f"{len(rows)} district(s) reporting · ordered by caseload.")
+        st.caption(f"{len(rows)} district(s) reporting.")
 
 
 def render_anomaly_card(claims):
@@ -1148,12 +907,10 @@ def render_anomaly_card(claims):
 
         ranked, clean = anomaly_rows(claims)
         if not ranked:
-            st.caption("No anomalies recorded against any claim on file.")
+            st.caption("No anomalies recorded.")
             return
 
         total = len(claims)
-        # Bars are scaled against the worst offender rather than the whole
-        # caseload, so the smaller categories stay visible.
         worst = ranked[0][1]
 
         bars = []
@@ -1172,18 +929,10 @@ def render_anomaly_card(claims):
         )
 
         with_anomaly = sum(hits for _, hits in ranked)
-        st.caption(
-            f"{with_anomaly} claim(s) carry an anomaly · {clean} clean · "
-            f"{len(ranked)} distinct anomaly type(s)."
-        )
+        st.caption(f"{with_anomaly} claim(s) flagged · {clean} clean.")
 
 
 def render_ai_insights_card(claims):
-    """Flagging and the summary both run here, in this process.
-
-    Only the officials past the sign-in gate ever reach this card, and the
-    claims handed to it are already scoped to what they are cleared to see.
-    """
     with glass("insights"):
         card_title("AI insights")
 
@@ -1194,8 +943,8 @@ def render_ai_insights_card(claims):
         result = st.session_state.get("ai_result")
         if result is None:
             st.caption(
-                "Runs the flagging rules over the caseload above and returns "
-                "a plain-English brief. Requires GROQ_API_KEY in .env."
+                "Runs flagging rules and returns a plain-English summary. "
+                "Requires GROQ_API_KEY in .env."
             )
             return
 
@@ -1207,11 +956,7 @@ def render_ai_insights_card(claims):
 
 
 def request_ai_summary(claims):
-    """Flag the caseload, then summarise it. Returns (level, message).
-
-    Every failure is caught: the dashboard is the useful half of this project
-    and must not go down because the model is unreachable or unkeyed.
-    """
+    """Flag claims and summarise findings. Returns (level, message)."""
     if not current_official():
         return "error", "Not signed in."
 
@@ -1228,14 +973,8 @@ def request_ai_summary(claims):
         return "error", "Analysis failed unexpectedly."
 
 
-# --- Map --------------------------------------------------------------------
-
-
 def build_map(claims):
-    """Esri satellite basemap with one marker per claim.
-
-    Returns the map and the ids of any claims that had no usable coordinates.
-    """
+    """Esri satellite map with markers for each claim."""
     fra_map = folium.Map(
         location=DEFAULT_MAP_CENTER, zoom_start=DEFAULT_MAP_ZOOM, tiles=None
     )
@@ -1267,8 +1006,6 @@ def build_map(claims):
         extent = hectares(claim)
         extent_text = f"{extent} ha" if extent is not None else "Not recorded"
 
-        # Claim records are free text, so everything here gets escaped before
-        # it goes into the popup's HTML.
         def field(key, default):
             return html.escape(str(claim.get(key) or default))
 
@@ -1295,8 +1032,6 @@ def build_map(claims):
         ).add_to(fra_map)
         plotted.append((lat, lon))
 
-    # Frame whatever is actually on the map rather than staying pinned to
-    # Bastar, so the view still works once other districts are in the data.
     if len(set(plotted)) > 1:
         fra_map.fit_bounds(
             [
@@ -1335,13 +1070,10 @@ def render_map_card(claims):
         )
 
     if skipped:
-        st.warning(
-            f"Skipped {len(skipped)} claim(s) with missing coordinates: "
-            f"{', '.join(skipped)}"
-        )
+        st.warning(f"Skipped {len(skipped)} claim(s) with missing coordinates.")
 
 
-# --- Page -------------------------------------------------------------------
+# --- Main page ---
 
 st.set_page_config(
     page_title="FRA Decision Support System",
@@ -1361,14 +1093,12 @@ with masthead:
     st.markdown(
         '<div class="fra-masthead">'
         "<h1>Forest Rights Act — Decision Support System</h1>"
-        "<p>Claim monitoring, title recognition and anomaly review · "
-        "administrative view</p>"
+        "<p>Claim monitoring, title recognition and anomaly review</p>"
         + (
             f'<p class="fra-stamp">Source: {html.escape(DATA_FILE.name)} · '
             f'generated {datetime.now().strftime("%d %b %Y, %H:%M")}</p>'
             if official
-            else '<p class="fra-stamp">Restricted — officials sign-in '
-            "required</p>"
+            else '<p class="fra-stamp">Restricted — officials sign-in required</p>'
         )
         + "</div>",
         unsafe_allow_html=True,
@@ -1381,9 +1111,6 @@ if background_warning:
     st.warning(background_warning)
 st.write("")
 
-# The gate. Nothing past this point runs for an anonymous visitor — the claims
-# file is not even opened, so an unauthenticated session cannot pull figures
-# out of an error message.
 if not official:
     render_auth_screen()
     st.stop()
@@ -1401,14 +1128,9 @@ if not claims:
     st.warning(f"{DATA_FILE.name} contains no claims.")
     st.stop()
 
-# Scoped once, here. Every card below is handed the filtered list, so a
-# district officer's totals, tables and map all agree on the same caseload.
 claims = visible_claims(claims, official)
 if not claims:
-    st.warning(
-        f"No claims on file for {official.get('district')}. "
-        "Clear the district on this account to see the full caseload."
-    )
+    st.warning(f"No claims on file for {official.get('district')}.")
     st.stop()
 
 decision_panel, map_panel = st.columns([1, 1.8], gap="medium")
