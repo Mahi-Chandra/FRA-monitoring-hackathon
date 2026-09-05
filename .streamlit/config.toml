@@ -1,5 +1,3 @@
-# White text floats on glass panes over a dark forest photo, so pin the dark
-# base rather than letting it follow the viewer's OS preference.
 
 [theme]
 base = "dark"
