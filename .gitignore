@@ -217,5 +217,7 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Locally registered demo users (contains names, phone numbers, addresses)
+# Officials accounts and retired session tokens. Password hashes are not
+# reversible, but these are still credentials — they stay out of the repo.
 users.json
+revoked_tokens.json

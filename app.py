@@ -3,6 +3,15 @@
 An administrative view over FRA claims: state and district progress against
 title recognition, extent of forest land recognised, and the anomalies holding
 individual claims up. Read-only — there is no public-facing intake here.
+
+Officials only: nothing below the masthead renders until a sign-in succeeds,
+and an official carrying a district sees that district's caseload alone.
+Accounts and tokens are handled by fra_auth, which the Flask API shares — so
+the token minted here is the one that opens /api/analyze-claims.
+
+There is no self-registration. This screen authenticates existing authorised
+administrators and nothing else; accounts are provisioned out of band, through
+fra_auth.create_user, by whoever administers the deployment.
 """
 
 import base64
@@ -13,11 +22,28 @@ from datetime import datetime
 from pathlib import Path
 
 import folium
+import requests
 import streamlit as st
 from streamlit_folium import st_folium
+from dotenv import load_dotenv
+load_dotenv()
+
+import fra_auth
+
+import fra_auth
 
 DATA_FILE = Path(__file__).parent / "mock_data.json"
 BACKGROUND_IMAGE = Path(__file__).parent / "forest_bg.jpg"
+
+# Where fra_ai_backend.py listens. The dashboard reads claims off disk, so the
+# only call that crosses this boundary is the AI analysis below.
+AI_BACKEND_URL = "http://localhost:5000"
+
+# Streamlit keeps no browser-side storage, so the signed token lives in
+# session_state: per browser tab, held in server memory, and gone on refresh.
+# Refreshing the page therefore means signing in again.
+TOKEN_KEY = "auth_token"
+AUTH_NOTICE_KEY = "auth_notice"
 
 # Fallback map view (Bastar district, Chhattisgarh) for when no claim carries
 # usable coordinates to fit the view to.
@@ -274,8 +300,12 @@ PANEL_CSS = """
 
 /* --- the glass tray the decision support panel sits in -------------------
    Held at 0.06 rather than 0.1 because the cards inside are themselves 0.1 —
-   stacking two 0.1 panes reads as one muddy 0.19 pane and the blur doubles. */
-[data-testid="stColumn"]:first-of-type {
+   stacking two 0.1 panes reads as one muddy 0.19 pane and the blur doubles.
+
+   Keyed on its own container rather than `stColumn:first-of-type`, which
+   matched the leading column of *every* row on the page — including the
+   masthead's — and wrapped each one in a stray frosted box. */
+div[class*="st-key-fra-tray"] {
     background: rgba(255, 255, 255, 0.06);
     border: 1px solid rgba(255, 255, 255, 0.16);
     border-radius: 24px;
@@ -439,6 +469,93 @@ div[class*="st-key-glass-map"] iframe {
     letter-spacing: 0.02em;
     border: 1px solid rgba(255, 255, 255, 0.18);
 }
+
+/* --- sign-in ------------------------------------------------------------
+   A single narrow pane centred on the photo. Deliberately laid out without
+   st.columns: the tray rule above claims the first column on the page, and
+   a centring column would pick that styling up and wrap the form in a second
+   frosted box. */
+div[class*="st-key-glass-auth"] {
+    max-width: 430px;
+    margin: 3vh auto 0;
+    padding: 1.6rem 1.7rem 1.5rem;
+}
+div[class*="st-key-glass-auth"] input {
+    background: rgba(255, 255, 255, 0.08) !important;
+    color: #ffffff !important;
+    border-radius: 10px;
+}
+div[class*="st-key-glass-auth"] [data-baseweb="input"],
+div[class*="st-key-glass-auth"] [data-baseweb="base-input"] {
+    background: transparent;
+    border-color: rgba(255, 255, 255, 0.28);
+    border-radius: 10px;
+}
+div[class*="st-key-glass-auth"] input::placeholder {
+    color: rgba(255, 255, 255, 0.45);
+}
+div[class*="st-key-glass-auth"] label p {
+    font-size: 0.72rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.78) !important;
+}
+/* the primary action: solid forest green, full width */
+div[class*="st-key-glass-auth"] button[kind="primaryFormSubmit"] {
+    background: #2e7d32;
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    color: #ffffff;
+    border-radius: 10px;
+    font-weight: 600;
+}
+div[class*="st-key-glass-auth"] button[kind="primaryFormSubmit"]:hover {
+    background: #388e3c;
+    border-color: rgba(255, 255, 255, 0.4);
+}
+.fra-auth-note {
+    font-size: 0.76rem;
+    color: rgba(255, 255, 255, 0.62);
+    margin: 0.9rem 0 0;
+    line-height: 1.45;
+}
+/* the restricted-access line above the form */
+.fra-auth-restricted {
+    font-size: 0.76rem;
+    color: rgba(255, 255, 255, 0.72);
+    margin: 0 0 1rem;
+    line-height: 1.45;
+}
+.fra-auth-restricted b { color: #a5d6a7; font-weight: 600; }
+
+/* the demo credential — deliberately the most visible thing on the form */
+.fra-demo-hint {
+    font-size: 0.78rem;
+    color: rgba(255, 255, 255, 0.9);
+    background: rgba(76, 175, 80, 0.14);
+    border: 1px dashed rgba(165, 214, 167, 0.55);
+    border-radius: 8px;
+    padding: 0.6rem 0.75rem;
+    margin: 0 0 1rem;
+    line-height: 1.55;
+}
+.fra-demo-hint b { color: #a5d6a7; font-weight: 600; }
+.fra-demo-hint code {
+    background: rgba(0, 0, 0, 0.32);
+    padding: 0.05rem 0.32rem;
+    border-radius: 4px;
+    color: #ffffff;
+}
+
+/* --- signed-in identity, sat in the masthead ----------------------------- */
+.fra-whoami {
+    font-size: 0.78rem;
+    color: rgba(255, 255, 255, 0.85);
+    text-align: right;
+    text-shadow: 0 1px 10px rgba(0, 0, 0, 0.5);
+    padding-top: 0.5rem;
+}
+.fra-whoami b { color: #ffffff; }
+.fra-whoami .scope { color: #a5d6a7; }
 </style>
 """
 
@@ -482,6 +599,198 @@ def table_html(columns, rows):
         f'<table class="fra-table"><thead><tr>{head}</tr></thead>'
         f"<tbody>{body}</tbody></table>"
     )
+
+
+# --- Officials authentication -----------------------------------------------
+# The dashboard signs officials in through fra_auth directly rather than over
+# HTTP, so the panel still works with the Flask service down. The token it
+# mints is an ordinary JWT either way, which is what lets the AI card below
+# present it to the protected endpoint.
+#
+# Sign-in is the only view: an account cannot be created from this interface,
+# so the sole way in is credentials an administrator issued beforehand.
+
+
+def current_official():
+    """Verified claims for this session, or None if nobody is signed in.
+
+    Re-verified on every rerun rather than trusted once at login, so a token
+    that expires or is logged out elsewhere drops the session on the next
+    interaction instead of lingering for the life of the tab.
+    """
+    token = st.session_state.get(TOKEN_KEY)
+    if not token:
+        return None
+
+    claims, error = fra_auth.decode_token(token)
+    if error:
+        st.session_state.pop(TOKEN_KEY, None)
+        st.session_state[AUTH_NOTICE_KEY] = ("warning", error)
+        return None
+    return claims
+
+
+def sign_in(email, password):
+    """Authenticate and stash the token. Returns an error string, or None.
+
+    The caller shows whatever comes back verbatim — and what comes back on
+    failure is always the same sentence, whether the email is unknown or the
+    password is simply wrong.
+    """
+    user = fra_auth.verify_credentials(email, password)
+    if user is None:
+        return fra_auth.GENERIC_LOGIN_ERROR
+
+    token, _ = fra_auth.issue_token(user)
+    st.session_state[TOKEN_KEY] = token
+    return None
+
+
+def sign_out():
+    """Retire the token server-side, then clear it from the session."""
+    token = st.session_state.get(TOKEN_KEY)
+    if token:
+        claims, error = fra_auth.decode_token(token)
+        if not error:
+            fra_auth.revoke_token(claims)
+    st.session_state.pop(TOKEN_KEY, None)
+    st.session_state[AUTH_NOTICE_KEY] = ("success", "Signed out.")
+
+
+def show_auth_notice():
+    """Drain the one-shot message left by the rerun that got us here."""
+    notice = st.session_state.pop(AUTH_NOTICE_KEY, None)
+    if not notice:
+        return
+    level, message = notice
+    getattr(st, level)(message)
+
+
+DEMO_SEEDED_KEY = "demo_seeded"
+
+
+def ensure_demo_account():
+    """Seed the advertised demo login, once per session.
+
+    Seeding hashes a password, which is slow enough not to want on every rerun
+    of the login form — and the account only has to be created once.
+    """
+    if st.session_state.get(DEMO_SEEDED_KEY):
+        return
+    fra_auth.ensure_demo_user()
+    st.session_state[DEMO_SEEDED_KEY] = True
+
+
+def render_demo_hint():
+    """The demo credential, spelled out on the form.
+
+    Read straight off fra_auth so what is shown cannot drift from what actually
+    signs in. This fake account is the only credential displayed anywhere in
+    the UI — no real official's password is ever shown, logged or hinted at,
+    and this block disappears entirely when FRA_DEMO_ACCOUNT=0.
+    """
+    if not fra_auth.DEMO_ACCOUNT_ENABLED:
+        return
+    st.markdown(
+        '<p class="fra-demo-hint"><b>Demo login</b> — sample account, for '
+        "evaluation only:<br>"
+        f'<code>{html.escape(fra_auth.DEMO_EMAIL)}</code> &nbsp;/&nbsp; '
+        f'<code>{html.escape(fra_auth.DEMO_PASSWORD)}</code></p>',
+        unsafe_allow_html=True,
+    )
+
+
+def render_login_form():
+    """The one way in: credentials against an account already on file.
+
+    Nothing here creates, names or hints at an account — a wrong email and a
+    wrong password come back as the same sentence, so the form cannot be used
+    to work out which addresses are registered.
+    """
+    card_title("Official sign in")
+    st.markdown(
+        '<p class="fra-auth-restricted">Restricted system. '
+        "<b>Authorised administrators only.</b> Access is logged, and this "
+        "session ends when the browser tab is refreshed.</p>",
+        unsafe_allow_html=True,
+    )
+    show_auth_notice()
+    ensure_demo_account()
+    render_demo_hint()
+
+    with st.form("login-form"):
+        email = st.text_input(
+            "Email",
+            placeholder="official@example.gov.in",
+            autocomplete="username",
+        )
+        password = st.text_input(
+            "Password", type="password", autocomplete="current-password"
+        )
+        submitted = st.form_submit_button(
+            "Sign in", use_container_width=True, type="primary"
+        )
+
+    if submitted:
+        # Caught before fra_auth so an empty submit does not burn a hash
+        # comparison, and so the user gets a prompt rather than a rejection.
+        if not email.strip() or not password:
+            st.error("Enter your email and password.")
+            return
+
+        error = sign_in(email, password)
+        if error:
+            st.error(error)
+        else:
+            st.rerun()
+
+    st.markdown(
+        '<p class="fra-auth-note">Accounts are issued by the system '
+        "administrator. If you cannot sign in, or need access revoked, "
+        "contact them directly — there is no self-service registration or "
+        "password reset here.</p>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_auth_screen():
+    """The whole page when nobody is signed in."""
+    with glass("auth"):
+        render_login_form()
+
+
+
+def render_identity_bar(official):
+    """Who is signed in, and the way out — sits beside the masthead."""
+    scope = official.get("district") or "All districts"
+    st.markdown(
+        '<div class="fra-whoami">'
+        f'<b>{html.escape(official.get("name", "Official"))}</b><br>'
+        f'{html.escape(official.get("role", fra_auth.OFFICIAL_ROLE)).title()} · '
+        f'<span class="scope">{html.escape(scope)}</span></div>',
+        unsafe_allow_html=True,
+    )
+    if st.button("Logout", use_container_width=True):
+        sign_out()
+        st.rerun()
+
+
+def visible_claims(claims, official):
+    """The caseload this official is cleared to see.
+
+    An admin, or an official with no district recorded, sees everything on
+    file. Otherwise the dashboard is scoped to their own district — every
+    figure, table and marker downstream derives from this list.
+    """
+    if official.get("role") == fra_auth.ADMIN_ROLE:
+        return claims
+
+    district = (official.get("district") or "").strip()
+    if not district:
+        return claims
+
+    wanted = district.casefold()
+    return [claim for claim in claims if district_of(claim).casefold() == wanted]
 
 
 # --- Decision support panel -------------------------------------------------
@@ -636,6 +945,77 @@ def render_anomaly_card(claims):
         )
 
 
+def render_ai_insights_card(claims):
+    """The one call that leaves this process, and the reason for the token.
+
+    /api/analyze-claims sits behind @token_required, so the session token
+    rides along as a bearer header. A 401 back means the token has aged out
+    or the two processes are not signing with the same FRA_JWT_SECRET.
+    """
+    with glass("insights"):
+        card_title("AI insights")
+
+        if st.button(f"Analyse {len(claims)} claim(s)", use_container_width=True):
+            with st.spinner("Asking the analysis service…"):
+                st.session_state["ai_result"] = request_ai_summary(claims)
+
+        result = st.session_state.get("ai_result")
+        if result is None:
+            st.caption(
+                "Runs the flagging rules over the caseload above and returns "
+                "a plain-English brief. Requires fra_ai_backend.py to be "
+                "running."
+            )
+            return
+
+        level, message = result
+        if level == "error":
+            st.error(message)
+        else:
+            st.write(message)
+
+
+def request_ai_summary(claims):
+    """POST the caseload to the protected endpoint. Returns (level, message).
+
+    Every failure is caught: the dashboard is the useful half of this project
+    and must not go down because an optional service is unreachable.
+    """
+    token = st.session_state.get(TOKEN_KEY)
+    if not token:
+        return "error", "Not signed in."
+
+    try:
+        response = requests.post(
+            f"{AI_BACKEND_URL}/api/analyze-claims",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"claims": claims},
+            timeout=60,
+        )
+    except requests.RequestException:
+        return "error", (
+            f"Could not reach the analysis service at {AI_BACKEND_URL}. "
+            "Start it with: python fra_ai_backend.py"
+        )
+
+    if response.status_code == 401:
+        return "error", (
+            "The analysis service rejected this session. Check that it was "
+            "started with the same FRA_JWT_SECRET as this dashboard."
+        )
+    # A traceback page or a proxy's HTML error is not JSON, so the body is
+    # only trusted once it parses.
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+
+    if not response.ok:
+        return "error", f"Analysis failed: {payload.get('error', response.reason)}"
+
+    return "info", payload.get("summary", "No summary returned.")
+
+
 # --- Map --------------------------------------------------------------------
 
 
@@ -762,18 +1142,39 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.markdown(
-    '<div class="fra-masthead">'
-    "<h1>Forest Rights Act — Decision Support System</h1>"
-    "<p>Claim monitoring, title recognition and anomaly review · "
-    "administrative view</p>"
-    f'<p class="fra-stamp">Source: {html.escape(DATA_FILE.name)} · '
-    f'generated {datetime.now().strftime("%d %b %Y, %H:%M")}</p></div>',
-    unsafe_allow_html=True,
-)
+official = current_official()
+
+masthead, identity = st.columns([4, 1], vertical_alignment="center")
+with masthead:
+    st.markdown(
+        '<div class="fra-masthead">'
+        "<h1>Forest Rights Act — Decision Support System</h1>"
+        "<p>Claim monitoring, title recognition and anomaly review · "
+        "administrative view</p>"
+        + (
+            f'<p class="fra-stamp">Source: {html.escape(DATA_FILE.name)} · '
+            f'generated {datetime.now().strftime("%d %b %Y, %H:%M")}</p>'
+            if official
+            else '<p class="fra-stamp">Restricted — officials sign-in '
+            "required</p>"
+        )
+        + "</div>",
+        unsafe_allow_html=True,
+    )
+with identity:
+    if official:
+        render_identity_bar(official)
+
 if background_warning:
     st.warning(background_warning)
 st.write("")
+
+# The gate. Nothing past this point runs for an anonymous visitor — the claims
+# file is not even opened, so an unauthenticated session cannot pull figures
+# out of an error message.
+if not official:
+    render_auth_screen()
+    st.stop()
 
 try:
     claims = load_claims(DATA_FILE.stat().st_mtime)
@@ -788,13 +1189,25 @@ if not claims:
     st.warning(f"{DATA_FILE.name} contains no claims.")
     st.stop()
 
+# Scoped once, here. Every card below is handed the filtered list, so a
+# district officer's totals, tables and map all agree on the same caseload.
+claims = visible_claims(claims, official)
+if not claims:
+    st.warning(
+        f"No claims on file for {official.get('district')}. "
+        "Clear the district on this account to see the full caseload."
+    )
+    st.stop()
+
 decision_panel, map_panel = st.columns([1, 1.8], gap="medium")
 
 with decision_panel:
-    render_programme_card(claims)
-    render_state_card(claims)
-    render_district_card(claims)
-    render_anomaly_card(claims)
+    with st.container(key="fra-tray"):
+        render_programme_card(claims)
+        render_state_card(claims)
+        render_district_card(claims)
+        render_anomaly_card(claims)
+        render_ai_insights_card(claims)
 
 with map_panel:
     render_map_card(claims)
