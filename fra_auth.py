@@ -1,21 +1,17 @@
-"""Officials authentication — shared by the Streamlit app and the Flask API.
+"""Officials authentication for the Streamlit dashboard.
 
 Accounts live in users.json next to mock_data.json, in the same flat-file
 spirit as the rest of the project. A password is only ever held long enough to
 hash it: what reaches disk is a Werkzeug scrypt digest, and nothing here logs,
 returns or stores the clear text.
 
-Both processes import this module, so a token minted by the Streamlit login
-verifies against the same secret the API checks.
-
 SETUP:
 1. pip install PyJWT
-2. Export a stable signing secret before starting either process:
+2. Export a stable signing secret before starting the dashboard:
      FRA_JWT_SECRET=$(python -c "import secrets;print(secrets.token_urlsafe(48))")
    Make it at least 32 bytes; HS256 keys shorter than that are weak, and PyJWT
-   raises InsecureKeyLengthWarning to say so. Without the variable set, each
-   process invents its own secret at import — so a token issued by the
-   dashboard will not verify at the API, and every restart silently logs
+   raises InsecureKeyLengthWarning to say so. Without the variable set, the
+   process invents its own secret at import — so every restart silently logs
    everyone out.
 """
 
@@ -256,7 +252,7 @@ def bearer_token(header_value):
 # --- Revocation -------------------------------------------------------------
 # JWTs are self-contained, so a logout has to be recorded somewhere for the
 # signature to stop counting. This keeps {jti: exp} on disk rather than in
-# memory so the Streamlit and Flask processes agree on what has been retired.
+# memory, so a logout survives a restart of the dashboard.
 
 
 def _load_revoked():

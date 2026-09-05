@@ -6,8 +6,9 @@ individual claims up. Read-only — there is no public-facing intake here.
 
 Officials only: nothing below the masthead renders until a sign-in succeeds,
 and an official carrying a district sees that district's caseload alone.
-Accounts and tokens are handled by fra_auth, which the Flask API shares — so
-the token minted here is the one that opens /api/analyze-claims.
+Accounts and tokens are handled by fra_auth. Claim flagging and the LLM
+summary run inside this process — there is no separate analysis service to
+start, and the only call that leaves the machine is the one to Groq.
 
 There is no self-registration. This screen authenticates existing authorised
 administrators and nothing else; accounts are provisioned out of band, through
@@ -17,6 +18,7 @@ fra_auth.create_user, by whoever administers the deployment.
 import base64
 import html
 import json
+import os
 from collections import Counter, defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -30,14 +32,34 @@ load_dotenv()
 
 import fra_auth
 
-import fra_auth
-
 DATA_FILE = Path(__file__).parent / "mock_data.json"
 BACKGROUND_IMAGE = Path(__file__).parent / "forest_bg.jpg"
 
-# Where fra_ai_backend.py listens. The dashboard reads claims off disk, so the
-# only call that crosses this boundary is the AI analysis below.
-AI_BACKEND_URL = "http://localhost:5000"
+# --- Analysis configuration -------------------------------------------------
+# Groq's free tier backs the AI insights card. The key is read once at import,
+# after load_dotenv(), so a missing one surfaces as a message on the card
+# rather than a crash on startup.
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b").strip()
+
+# Groq's free tier is quick; 30s is generous for a few hundred claims and
+# still short enough that a stuck call does not hold the rerun open for long.
+LLM_TIMEOUT_SECONDS = 30
+
+# A whole caseload pasted into one prompt would blow the context window and
+# the rate limit. Beyond this the summary is built from a prefix and the
+# prompt says so, rather than the request failing.
+MAX_CLAIMS_IN_PROMPT = 150
+
+# FRA s.4(6) caps individual forest rights at 4 hectares. Anything larger is
+# not automatically wrong — community claims exist — but it is worth a look.
+INDIVIDUAL_AREA_CEILING_HA = 4.0
+
+# How long a pending claim may sit before the delay is itself the anomaly.
+PENDING_DAYS_THRESHOLD = 90
+
+NO_ANOMALY_VALUES = {"", "none", "no anomaly", "n/a", "-"}
 
 # Streamlit keeps no browser-side storage, so the signed token lives in
 # session_state: per browser tab, held in server memory, and gone on refresh.
@@ -169,9 +191,15 @@ def state_of(claim):
 
 
 def hectares(claim):
-    """Recorded extent, or None. Guards against nulls and stray strings."""
-    value = claim.get("land_area_ha")
-    return float(value) if isinstance(value, (int, float)) else None
+    """Recorded extent, or None. Guards against nulls and stray strings.
+
+    `area_ha` is accepted as a fallback spelling, and a bool is not an extent
+    however happily Python treats it as an int.
+    """
+    value = claim.get("land_area_ha", claim.get("area_ha"))
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
 def summarise(claims):
@@ -602,10 +630,9 @@ def table_html(columns, rows):
 
 
 # --- Officials authentication -----------------------------------------------
-# The dashboard signs officials in through fra_auth directly rather than over
-# HTTP, so the panel still works with the Flask service down. The token it
-# mints is an ordinary JWT either way, which is what lets the AI card below
-# present it to the protected endpoint.
+# The dashboard signs officials in through fra_auth directly, in this process:
+# no HTTP hop, no second service to keep up. The token it mints is an ordinary
+# JWT held in session_state, and every rerun re-verifies it.
 #
 # Sign-in is the only view: an account cannot be created from this interface,
 # so the sole way in is credentials an administrator issued beforehand.
@@ -793,6 +820,212 @@ def visible_claims(claims, official):
     return [claim for claim in claims if district_of(claim).casefold() == wanted]
 
 
+# --- Rule-based checks ------------------------------------------------------
+# Deterministic, instant, and free. These run first so the model is
+# summarising findings rather than being trusted to spot them.
+
+
+class LLMError(RuntimeError):
+    """An LLM call that failed in a way worth showing an official.
+
+    Carries a message already fit for the dashboard: no stack traces, no
+    request URLs, and never the API key, whatever the underlying library put
+    in its own exception text.
+    """
+
+
+def days_since(date_str):
+    """Days since a given date (YYYY-MM-DD), or None if it is missing or
+    unparseable — mock_data.json records no filed_date, and one absent field
+    should sit a rule out rather than fail the whole analysis."""
+    try:
+        filed = datetime.strptime(date_str, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return None
+    return (datetime.now() - filed).days
+
+
+def recorded_anomaly(claim):
+    """The upstream anomaly note, or None when the record is clean."""
+    anomaly = str(claim.get("anomaly") or "").strip()
+    return None if anomaly.lower() in NO_ANOMALY_VALUES else anomaly
+
+
+def rule_based_flags(claims):
+    """
+    Fast, deterministic anomaly checks — no AI needed for this part.
+    Add more rules here as your project needs (duplicates, overlaps, etc).
+
+    Field names follow mock_data.json: claim_id, applicant_name, district,
+    lat, lon, status, anomaly, land_area_ha. Every rule tolerates its field
+    being missing, so a partial record loses one check rather than the run.
+    """
+    seen_ids = set()
+    duplicate_ids = set()
+    for claim in claims:
+        claim_id = claim.get("claim_id")
+        if not claim_id:
+            continue
+        if claim_id in seen_ids:
+            duplicate_ids.add(claim_id)
+        seen_ids.add(claim_id)
+
+    flagged = []
+    for claim in claims:
+        flags = []
+        status = str(claim.get("status") or "").strip()
+
+        anomaly = recorded_anomaly(claim)
+        if anomaly:
+            flags.append(anomaly)
+
+        waiting = days_since(claim.get("filed_date"))
+        if (
+            status.lower() == "pending"
+            and waiting is not None
+            and waiting > PENDING_DAYS_THRESHOLD
+        ):
+            flags.append(f"Pending {waiting} days")
+
+        extent = hectares(claim)
+        if extent is None:
+            flags.append("No land extent recorded")
+        elif extent > INDIVIDUAL_AREA_CEILING_HA:
+            flags.append(
+                f"{extent:g} ha exceeds the {INDIVIDUAL_AREA_CEILING_HA:g} ha "
+                "individual ceiling"
+            )
+
+        if claim.get("lat") is None or claim.get("lon") is None:
+            flags.append("No mapped location")
+
+        if claim.get("claim_id") in duplicate_ids:
+            flags.append("Duplicate claim id")
+
+        if not flags:
+            flags.append("No issues")
+
+        flagged.append({**claim, "flags": flags})
+    return flagged
+
+
+# --- LLM summary ------------------------------------------------------------
+
+
+def prompt_payload(flagged_claims):
+    """The claims as compact JSON, trimmed to what the model needs to read.
+
+    Coordinates and any other extras are dropped: they cost tokens and the
+    summary never cites them.
+    """
+    trimmed = [
+        {
+            "claim_id": claim.get("claim_id"),
+            "applicant_name": claim.get("applicant_name"),
+            "district": claim.get("district"),
+            "status": claim.get("status"),
+            "land_area_ha": claim.get("land_area_ha", claim.get("area_ha")),
+            "flags": claim.get("flags", []),
+        }
+        for claim in flagged_claims[:MAX_CLAIMS_IN_PROMPT]
+    ]
+    body = json.dumps(trimmed, indent=2, ensure_ascii=False)
+
+    dropped = len(flagged_claims) - len(trimmed)
+    if dropped > 0:
+        body += (
+            f"\n\n(Showing the first {len(trimmed)} of "
+            f"{len(flagged_claims)} claims; {dropped} were omitted for "
+            "length. Say so in the summary.)"
+        )
+    return body
+
+
+def build_prompt(flagged_claims):
+    return f"""You are an assistant for Forest Rights Act officials.
+Here is claims data with anomaly flags already computed:
+
+{prompt_payload(flagged_claims)}
+
+Do NOT repeat totals like claim counts, status breakdown, or district counts — those numbers already appear elsewhere on the dashboard. Instead, using the "flags" field on each claim, tell the official something they cannot already see at a glance:
+
+TOP CONCERN: the single most urgent claim (ID) and exactly why — pick the one where flags compound each other (e.g. long delay + missing data), not just the oldest or the first flagged.
+
+PATTERN: one line spotting something across multiple claims — a repeated flag type, several claims sharing the same problem, or an anomaly cluster worth investigating as one issue rather than fixing individually.
+
+WATCH: one claim that looks clean now but has an early warning sign (e.g. approaching the pending threshold, land area right at the ceiling) that could become a problem soon if ignored.
+
+Each section max 2 lines, under 15 words per line. No markdown, no repeated numbers, no restating what flags already say verbatim — interpret them."""
+
+
+def groq_error_message(response):
+    """Groq's own complaint, if it sent one, else the bare status line."""
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+    detail = (payload.get("error") or {}).get("message")
+    if response.status_code == 401:
+        return "Groq rejected the API key — check GROQ_API_KEY."
+    if response.status_code == 429:
+        return "Groq rate limit reached — wait a moment and try again."
+    if detail:
+        return f"Groq returned {response.status_code}: {detail}"
+    return f"Groq returned {response.status_code}."
+
+
+def get_ai_summary(flagged_claims):
+    """
+    Sends the already-flagged data to Groq's free LLM API
+    and asks for a short plain-English summary for officials.
+
+    Raises LLMError with a displayable message on every failure path.
+    """
+    if not GROQ_API_KEY:
+        raise LLMError(
+            "GROQ_API_KEY is not set. Add it to .env next to app.py and "
+            "restart the dashboard."
+        )
+
+    try:
+        response = requests.post(
+            GROQ_URL,
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": GROQ_MODEL,
+                "messages": [
+                    {"role": "user", "content": build_prompt(flagged_claims)}
+                ],
+                "temperature": 0.2,
+            },
+            timeout=LLM_TIMEOUT_SECONDS,
+        )
+    except requests.Timeout:
+        raise LLMError(
+            f"Groq did not respond within {LLM_TIMEOUT_SECONDS} seconds."
+        ) from None
+    except requests.RequestException:
+        # Deliberately not str(exc): urllib3 messages carry the full request
+        # context, which is noise at best in a dashboard toast.
+        raise LLMError("Could not reach the Groq API.") from None
+
+    if not response.ok:
+        raise LLMError(groq_error_message(response))
+
+    try:
+        summary = response.json()["choices"][0]["message"]["content"]
+    except (ValueError, KeyError, IndexError, TypeError):
+        raise LLMError("Groq returned a response in an unexpected shape.") from None
+
+    summary = (summary or "").strip()
+    if not summary:
+        raise LLMError("Groq returned an empty summary.")
+    return summary
+
+
 # --- Decision support panel -------------------------------------------------
 
 
@@ -946,25 +1179,23 @@ def render_anomaly_card(claims):
 
 
 def render_ai_insights_card(claims):
-    """The one call that leaves this process, and the reason for the token.
+    """Flagging and the summary both run here, in this process.
 
-    /api/analyze-claims sits behind @token_required, so the session token
-    rides along as a bearer header. A 401 back means the token has aged out
-    or the two processes are not signing with the same FRA_JWT_SECRET.
+    Only the officials past the sign-in gate ever reach this card, and the
+    claims handed to it are already scoped to what they are cleared to see.
     """
     with glass("insights"):
         card_title("AI insights")
 
         if st.button(f"Analyse {len(claims)} claim(s)", use_container_width=True):
-            with st.spinner("Asking the analysis service…"):
+            with st.spinner("Analysing the caseload…"):
                 st.session_state["ai_result"] = request_ai_summary(claims)
 
         result = st.session_state.get("ai_result")
         if result is None:
             st.caption(
                 "Runs the flagging rules over the caseload above and returns "
-                "a plain-English brief. Requires fra_ai_backend.py to be "
-                "running."
+                "a plain-English brief. Requires GROQ_API_KEY in .env."
             )
             return
 
@@ -976,44 +1207,25 @@ def render_ai_insights_card(claims):
 
 
 def request_ai_summary(claims):
-    """POST the caseload to the protected endpoint. Returns (level, message).
+    """Flag the caseload, then summarise it. Returns (level, message).
 
     Every failure is caught: the dashboard is the useful half of this project
-    and must not go down because an optional service is unreachable.
+    and must not go down because the model is unreachable or unkeyed.
     """
-    token = st.session_state.get(TOKEN_KEY)
-    if not token:
+    if not current_official():
         return "error", "Not signed in."
 
+    if not isinstance(claims, list) or not claims:
+        return "error", "No claims data to analyse."
+
+    flagged = rule_based_flags(claims)
+
     try:
-        response = requests.post(
-            f"{AI_BACKEND_URL}/api/analyze-claims",
-            headers={"Authorization": f"Bearer {token}"},
-            json={"claims": claims},
-            timeout=60,
-        )
-    except requests.RequestException:
-        return "error", (
-            f"Could not reach the analysis service at {AI_BACKEND_URL}. "
-            "Start it with: python fra_ai_backend.py"
-        )
-
-    if response.status_code == 401:
-        return "error", (
-            "The analysis service rejected this session. Check that it was "
-            "started with the same FRA_JWT_SECRET as this dashboard."
-        )
-    # A traceback page or a proxy's HTML error is not JSON, so the body is
-    # only trusted once it parses.
-    try:
-        payload = response.json()
-    except ValueError:
-        payload = {}
-
-    if not response.ok:
-        return "error", f"Analysis failed: {payload.get('error', response.reason)}"
-
-    return "info", payload.get("summary", "No summary returned.")
+        return "info", get_ai_summary(flagged)
+    except LLMError as exc:
+        return "error", str(exc)
+    except Exception:
+        return "error", "Analysis failed unexpectedly."
 
 
 # --- Map --------------------------------------------------------------------
